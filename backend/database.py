@@ -31,3 +31,11 @@ class Base(DeclarativeBase):
 def test_connection():
     with engine.connect() as connection:
         return connection.execute(text("SELECT 1")).scalar_one()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
