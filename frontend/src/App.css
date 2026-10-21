@@ -664,3 +664,73 @@ main,
   }
 }
 
+
+.admin-section {
+  scroll-margin-top: 24px;
+}
+
+.admin-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.admin-stat-card {
+  padding: 20px;
+  border: 1px solid #3a3a3a;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow-wrap: anywhere;
+}
+
+.admin-stat-icon {
+  font-size: 24px;
+}
+
+.admin-stat-card p {
+  margin: 12px 0 8px;
+  color: #b8b8b8;
+  font-size: 14px;
+}
+
+.admin-stat-card h3 {
+  margin: 0;
+  font-size: 26px;
+}
+
+.admin-progress {
+  margin-top: 28px;
+}
+
+.admin-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.admin-progress-track {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #333;
+}
+
+.admin-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #c5f467;
+  transition: width 0.3s ease;
+}
+
+#dashboard-event {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #181818;
+  color: #fff;
+  font: inherit;
+}
+

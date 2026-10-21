@@ -4,6 +4,167 @@ import "./App.css";
 
 const API_URL = "http://127.0.0.1:8000";
 
+// ADMIN DASHBOARD
+function Dashboard({ events }) {
+  const [eventId, setEventId] = useState("");
+  const [stats, setStats] = useState(null);
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [dashboardError, setDashboardError] = useState("");
+
+  async function loadDashboard(id = eventId) {
+    if (!id) {
+      setDashboardError("Please select an event.");
+      return;
+    }
+
+    setLoadingStats(true);
+    setDashboardError("");
+
+    try {
+      const response = await fetch(`${API_URL}/events/${id}/dashboard`);
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Unable to load dashboard statistics."
+        );
+      }
+
+      setStats(data);
+      setEventId(String(id));
+    } catch (err) {
+      setDashboardError(err.message || "Could not connect to the backend.");
+    } finally {
+      setLoadingStats(false);
+    }
+  }
+
+  const cards = stats
+    ? [
+        { label: "Total Seats", value: stats.total_seats, icon: "🪑" },
+        { label: "Available Seats", value: stats.available_seats, icon: "🟢" },
+        { label: "Held Seats", value: stats.held_seats, icon: "🟡" },
+        { label: "Booked Seats", value: stats.booked_seats, icon: "🎟️" },
+        {
+          label: "Confirmed Bookings",
+          value: stats.confirmed_bookings,
+          icon: "✅",
+        },
+        {
+          label: "Total Revenue",
+          value: `₹${Number(stats.total_revenue ?? 0).toLocaleString("en-IN")}`,
+          icon: "💰",
+        },
+        {
+          label: "Checked-in Attendees",
+          value: stats.checked_in_count,
+          icon: "🚪",
+        },
+      ]
+    : [];
+
+  const occupancy =
+    stats && Number(stats.total_seats) > 0
+      ? Math.min(
+          100,
+          Math.round((stats.booked_seats / stats.total_seats) * 100)
+        )
+      : 0;
+
+  return (
+    <section className="seat-section admin-section" id="admin-dashboard">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">EVENT MANAGEMENT</span>
+          <h2>
+            Admin Dashboard<span>.</span>
+          </h2>
+          <p>Monitor bookings, revenue, seats, and attendance.</p>
+        </div>
+      </div>
+
+      <div className="booking-summary">
+        <div className="customer-fields">
+          <label htmlFor="dashboard-event">Select event</label>
+          <select
+            id="dashboard-event"
+            value={eventId}
+            onChange={(event) => {
+              setEventId(event.target.value);
+              setStats(null);
+              setDashboardError("");
+            }}
+          >
+            <option value="">Choose an event</option>
+            {events.map((event) => (
+              <option key={event.id} value={event.id}>
+                {event.name || event.event_name} (ID: {event.id})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          type="button"
+          className="book-button"
+          onClick={() => loadDashboard()}
+          disabled={loadingStats || !eventId}
+        >
+          {loadingStats ? "Loading statistics..." : "Load / Refresh Dashboard ↻"}
+        </button>
+
+        {dashboardError && (
+          <p className="message error" role="alert">
+            {dashboardError}
+          </p>
+        )}
+
+        {stats && (
+          <>
+            <h3>{stats.event_name}</h3>
+            <p className="summary-note">
+              Event ID: {stats.event_id}. Refresh to get the latest figures.
+            </p>
+
+            <div className="admin-stats-grid">
+              {cards.map((card) => (
+                <article className="admin-stat-card" key={card.label}>
+                  <span className="admin-stat-icon">{card.icon}</span>
+                  <p>{card.label}</p>
+                  <h3>{card.value ?? 0}</h3>
+                </article>
+              ))}
+            </div>
+
+            <div className="admin-progress">
+              <div className="admin-progress-heading">
+                <span>Seat occupancy</span>
+                <strong>{occupancy}%</strong>
+              </div>
+
+              <div
+                className="admin-progress-track"
+                role="progressbar"
+                aria-label="Seat occupancy"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={occupancy}
+              >
+                <div
+                  className="admin-progress-fill"
+                  style={{ width: `${occupancy}%` }}
+                />
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState(null);
@@ -23,6 +184,12 @@ function App() {
   const [bookingError, setBookingError] = useState("");
   const [paymentMessage, setPaymentMessage] = useState("");
   const [ticket, setTicket] = useState(null);
+
+  // Ticket check-in states
+  const [ticketCode, setTicketCode] = useState("");
+  const [checkinLoading, setCheckinLoading] = useState(false);
+  const [checkinResult, setCheckinResult] = useState(null);
+  const [checkinError, setCheckinError] = useState("");
 
   useEffect(() => {
     fetch(`${API_URL}/events`)
@@ -219,6 +386,46 @@ function App() {
     }
   }
 
+  async function checkInTicket(event) {
+    event.preventDefault();
+
+    const code = ticketCode.trim();
+
+    if (!code) {
+      setCheckinError("Please enter a ticket code.");
+      setCheckinResult(null);
+      return;
+    }
+
+    setCheckinLoading(true);
+    setCheckinError("");
+    setCheckinResult(null);
+
+    try {
+      const response = await fetch(
+        `${API_URL}/check-in/${encodeURIComponent(code)}`,
+        { method: "POST" }
+      );
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          getErrorMessage(data, "Check-in failed. Verify the ticket code.")
+        );
+      }
+
+      setCheckinResult(data);
+      setTicketCode("");
+    } catch (err) {
+      setCheckinError(
+        err.message || "Could not connect to the check-in server."
+      );
+    } finally {
+      setCheckinLoading(false);
+    }
+  }
+
   function formatDate(date) {
     if (!date) return "Date to be announced";
 
@@ -306,9 +513,7 @@ function App() {
           {!loading && error && !selectedEvent && (
             <div className="message error">
               {error}
-              <button onClick={() => window.location.reload()}>
-                Retry
-              </button>
+              <button onClick={() => window.location.reload()}>Retry</button>
             </div>
           )}
 
@@ -385,9 +590,7 @@ function App() {
             ) : error && selectedEvent ? (
               <div className="message error">
                 {error}
-                <button onClick={() => openEvent(selectedEvent)}>
-                  Retry
-                </button>
+                <button onClick={() => openEvent(selectedEvent)}>Retry</button>
               </div>
             ) : seats.length === 0 ? (
               <p className="message">No seats found for this event.</p>
@@ -470,6 +673,7 @@ function App() {
                         placeholder="Enter your full name"
                         disabled={bookingLoading}
                       />
+
                       <label htmlFor="customer-email">Email address</label>
                       <input
                         id="customer-email"
@@ -496,9 +700,7 @@ function App() {
                       onClick={holdSeats}
                       disabled={bookingLoading}
                     >
-                      {bookingLoading
-                        ? "Holding seats..."
-                        : "Continue to Booking →"}
+                      {bookingLoading ? "Holding seats..." : "Continue to Booking →"}
                     </button>
                     <p className="summary-note">
                       Seats are held temporarily for 5 minutes.
@@ -511,8 +713,7 @@ function App() {
                     <span className="eyebrow">STEP 2 · MOCK PAYMENT</span>
                     <h3>Seats held successfully!</h3>
                     <p>
-                      Booking code:{" "}
-                      <strong>{bookingResult.booking_code}</strong>
+                      Booking code: <strong>{bookingResult.booking_code}</strong>
                     </p>
                     <p>
                       Amount:{" "}
@@ -523,7 +724,6 @@ function App() {
                     <p>
                       Status: <strong>{bookingResult.status}</strong>
                     </p>
-
                     <p className="summary-note">
                       This is a simulated payment for project testing, not a
                       real payment. Complete it before the 5-minute hold expires.
@@ -546,7 +746,6 @@ function App() {
                           ? "Processing..."
                           : "✓ Simulate Successful Payment"}
                       </button>
-
                       <button
                         type="button"
                         className="close-button"
@@ -588,18 +787,10 @@ function App() {
                     <p>{formatDate(selectedEvent.starts_at)}</p>
 
                     <div className="ticket-details">
-                      <p>
-                        <strong>Customer:</strong> {ticket.customer_name}
-                      </p>
-                      <p>
-                        <strong>Email:</strong> {ticket.customer_email}
-                      </p>
-                      <p>
-                        <strong>Booking code:</strong> {ticket.booking_code}
-                      </p>
-                      <p>
-                        <strong>Ticket code:</strong> {ticket.ticket_code}
-                      </p>
+                      <p><strong>Customer:</strong> {ticket.customer_name}</p>
+                      <p><strong>Email:</strong> {ticket.customer_email}</p>
+                      <p><strong>Booking code:</strong> {ticket.booking_code}</p>
+                      <p><strong>Ticket code:</strong> {ticket.ticket_code}</p>
                       <p>
                         <strong>Seats:</strong>{" "}
                         {ticket.seats
@@ -611,9 +802,7 @@ function App() {
                       </p>
                       <p>
                         <strong>Status:</strong>{" "}
-                        <span className="selected-status">
-                          {ticket.status}
-                        </span>
+                        <span className="selected-status">{ticket.status}</span>
                       </p>
                     </div>
 
@@ -628,7 +817,6 @@ function App() {
                     >
                       Print Ticket / Save as PDF
                     </button>
-
                     <button
                       type="button"
                       className="close-button"
@@ -642,6 +830,83 @@ function App() {
             )}
           </section>
         )}
+
+        {/* TICKET CHECK-IN */}
+        <section className="seat-section checkin-section" id="check-in">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">EVENT STAFF</span>
+              <h2>
+                Ticket check-in<span>.</span>
+              </h2>
+              <p>Validate a confirmed ticket at the event entrance.</p>
+            </div>
+          </div>
+
+          <form className="booking-summary" onSubmit={checkInTicket}>
+            <div className="customer-fields">
+              <label htmlFor="ticket-code">Ticket code</label>
+              <input
+                id="ticket-code"
+                type="text"
+                value={ticketCode}
+                onChange={(event) => {
+                  setTicketCode(event.target.value);
+                  setCheckinError("");
+                  setCheckinResult(null);
+                }}
+                placeholder="Enter the ticket code"
+                autoComplete="off"
+                disabled={checkinLoading}
+              />
+            </div>
+
+            {checkinError && (
+              <p className="message error" role="alert">
+                {checkinError}
+              </p>
+            )}
+
+            {checkinResult && (
+              <div className="ticket-details" role="status">
+                <h3>Check-in successful!</h3>
+                <p>
+                  <strong>Customer:</strong>{" "}
+                  {checkinResult.customer_name ?? "Confirmed"}
+                </p>
+                {checkinResult.seats && (
+                  <p>
+                    <strong>Seats:</strong>{" "}
+                    {Array.isArray(checkinResult.seats)
+                      ? checkinResult.seats
+                          .map((seat) =>
+                            typeof seat === "string"
+                              ? seat
+                              : `${seat.row ?? ""}${seat.seat_number ?? ""}`
+                          )
+                          .join(", ")
+                      : String(checkinResult.seats)}
+                  </p>
+                )}
+                <p><strong>Result:</strong> Attendee checked in.</p>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="book-button"
+              disabled={checkinLoading}
+            >
+              {checkinLoading ? "Verifying ticket..." : "Verify & Check In →"}
+            </button>
+            <p className="summary-note">
+              Enter the ticket code, not the booking code.
+            </p>
+          </form>
+        </section>
+
+        {/* ADMIN DASHBOARD */}
+        <Dashboard events={events} />
       </main>
 
       <footer className="footer">
