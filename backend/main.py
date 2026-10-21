@@ -1,25 +1,37 @@
 
 from pydantic import BaseModel
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from datetime import datetime, timedelta, timezone
 import secrets
-
-from sqlalchemy import select
+import qrcode
+import base64
+from io import BytesIO
 
 import models
 import schemas
 from database import Base, engine, get_db
 
-import qrcode
-import base64
-from io import BytesIO
 
 app = FastAPI(
     title="Housefull API",
     description="Seat booking and event management API",
     version="1.0.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def generate_qr_code(ticket_code: str) -> str:
     qr = qrcode.QRCode(
@@ -38,7 +50,8 @@ def generate_qr_code(ticket_code: str) -> str:
     encoded_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{encoded_image}"
 
-# Create any missing database tables during startup.
+
+# Create missing database tables during startup.
 Base.metadata.create_all(bind=engine)
 
 
@@ -55,11 +68,24 @@ def health_check():
     return {"status": "healthy"}
 
 
-@app.post("/events", response_model=schemas.EventResponse, status_code=201)
-def create_event(event: schemas.EventCreate, db: Session = Depends(get_db)):
-    # Validate seat rows and their prices.
+# --------------------------------------------------
+# EVENTS
+# --------------------------------------------------
+
+@app.post(
+    "/events",
+    response_model=schemas.EventResponse,
+    status_code=201,
+)
+def create_event(
+    event: schemas.EventCreate,
+    db: Session = Depends(get_db),
+):
     if not event.rows:
-        raise HTTPException(status_code=400, detail="At least one row is required")
+        raise HTTPException(
+            status_code=400,
+            detail="At least one row is required",
+        )
 
     if set(event.rows.keys()) != set(event.row_prices.keys()):
         raise HTTPException(
@@ -93,7 +119,6 @@ def create_event(event: schemas.EventCreate, db: Session = Depends(get_db)):
         db.add(new_event)
         db.flush()
 
-        # Generate individual seats for every row.
         for row_label, seat_count in event.rows.items():
             for seat_number in range(1, seat_count + 1):
                 seat = models.Seat(
@@ -114,19 +139,37 @@ def create_event(event: schemas.EventCreate, db: Session = Depends(get_db)):
         raise
 
 
-@app.get("/events", response_model=list[schemas.EventResponse])
+@app.get(
+    "/events",
+    response_model=list[schemas.EventResponse],
+)
 def get_events(db: Session = Depends(get_db)):
-    return db.query(models.Event).order_by(models.Event.id.desc()).all()
+    return (
+        db.query(models.Event)
+        .order_by(models.Event.id.desc())
+        .all()
+    )
 
 
-@app.get("/events/{event_id}", response_model=schemas.EventResponse)
-def get_event(event_id: int, db: Session = Depends(get_db)):
-    event = db.query(models.Event).filter(
-        models.Event.id == event_id
-    ).first()
+@app.get(
+    "/events/{event_id}",
+    response_model=schemas.EventResponse,
+)
+def get_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+):
+    event = (
+        db.query(models.Event)
+        .filter(models.Event.id == event_id)
+        .first()
+    )
 
     if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
 
     return event
 
@@ -135,7 +178,10 @@ def get_event(event_id: int, db: Session = Depends(get_db)):
     "/events/{event_id}/seats",
     response_model=list[schemas.SeatResponse],
 )
-def get_event_seats(event_id: int, db: Session = Depends(get_db)):
+def get_event_seats(
+    event_id: int,
+    db: Session = Depends(get_db),
+):
     event = (
         db.query(models.Event)
         .filter(models.Event.id == event_id)
@@ -143,23 +189,25 @@ def get_event_seats(event_id: int, db: Session = Depends(get_db)):
     )
 
     if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
 
-    seats = (
+    return (
         db.query(models.Seat)
         .filter(models.Seat.event_id == event_id)
-        .order_by(models.Seat.row_label, models.Seat.seat_number)
+        .order_by(
+            models.Seat.row_label,
+            models.Seat.seat_number,
+        )
         .all()
     )
 
-    return seats
 
-
-from datetime import datetime, timedelta, timezone
-import secrets
-
-from sqlalchemy import select
-
+# --------------------------------------------------
+# SEAT HOLDING AND BOOKING
+# --------------------------------------------------
 
 @app.post("/bookings/hold", status_code=201)
 def hold_seats(
@@ -168,7 +216,12 @@ def hold_seats(
 ):
     seat_ids = request.seat_ids
 
-    # Reject duplicate seat IDs in the same request.
+    if not seat_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Select at least one seat",
+        )
+
     if len(seat_ids) != len(set(seat_ids)):
         raise HTTPException(
             status_code=400,
@@ -179,7 +232,6 @@ def hold_seats(
     expires_at = now + timedelta(minutes=5)
 
     try:
-        # Lock requested seat rows to prevent simultaneous holds.
         seats = db.scalars(
             select(models.Seat)
             .where(models.Seat.id.in_(seat_ids))
@@ -193,7 +245,17 @@ def hold_seats(
                 detail="One or more seats were not found",
             )
 
-        # Release expired holds on the requested seats.
+        # All selected seats must belong to one event.
+        if any(
+            seat.event_id != seats[0].event_id
+            for seat in seats
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="All seats must belong to the same event",
+            )
+
+        # Release expired holds.
         for seat in seats:
             if (
                 seat.status == "held"
@@ -204,7 +266,9 @@ def hold_seats(
                 seat.hold_expires_at = None
 
         unavailable = [
-            seat.id for seat in seats if seat.status != "available"
+            seat.id
+            for seat in seats
+            if seat.status != "available"
         ]
 
         if unavailable:
@@ -216,7 +280,9 @@ def hold_seats(
                 },
             )
 
-        total_amount = sum(float(seat.price) for seat in seats)
+        total_amount = sum(
+            float(seat.price) for seat in seats
+        )
 
         booking = models.Booking(
             booking_code=secrets.token_urlsafe(12),
@@ -227,13 +293,6 @@ def hold_seats(
             total_amount=total_amount,
             expires_at=expires_at,
         )
-
-        # Seats must belong to the same event.
-        if any(seat.event_id != seats[0].event_id for seat in seats):
-            raise HTTPException(
-                status_code=400,
-                detail="All seats must belong to the same event",
-            )
 
         db.add(booking)
         db.flush()
@@ -271,9 +330,13 @@ def hold_seats(
         raise
 
 
+# --------------------------------------------------
+# MOCK PAYMENT
+# --------------------------------------------------
+
 class PaymentRequest(BaseModel):
     booking_code: str
-    payment_status: str  # "success" or "fail"
+    payment_status: str
 
 
 @app.post("/payments/mock")
@@ -284,13 +347,18 @@ def mock_payment(
     try:
         booking = (
             db.query(models.Booking)
-            .filter(models.Booking.booking_code == request.booking_code)
+            .filter(
+                models.Booking.booking_code == request.booking_code
+            )
             .with_for_update()
             .first()
         )
 
         if booking is None:
-            raise HTTPException(status_code=404, detail="Booking not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Booking not found",
+            )
 
         if booking.status != "pending":
             raise HTTPException(
@@ -300,13 +368,21 @@ def mock_payment(
 
         now = datetime.now(timezone.utc)
 
-        if booking.expires_at is None or booking.expires_at <= now:
+        if (
+            booking.expires_at is None
+            or booking.expires_at <= now
+        ):
             booking.status = "expired"
 
             seats = (
                 db.query(models.Seat)
-                .join(models.BookingSeat, models.BookingSeat.seat_id == models.Seat.id)
-                .filter(models.BookingSeat.booking_id == booking.id)
+                .join(
+                    models.BookingSeat,
+                    models.BookingSeat.seat_id == models.Seat.id,
+                )
+                .filter(
+                    models.BookingSeat.booking_id == booking.id
+                )
                 .all()
             )
 
@@ -316,7 +392,11 @@ def mock_payment(
                     seat.hold_expires_at = None
 
             db.commit()
-            raise HTTPException(status_code=409, detail="Seat hold has expired")
+
+            raise HTTPException(
+                status_code=409,
+                detail="Seat hold has expired",
+            )
 
         if request.payment_status not in ("success", "fail"):
             raise HTTPException(
@@ -326,8 +406,13 @@ def mock_payment(
 
         seats = (
             db.query(models.Seat)
-            .join(models.BookingSeat, models.BookingSeat.seat_id == models.Seat.id)
-            .filter(models.BookingSeat.booking_id == booking.id)
+            .join(
+                models.BookingSeat,
+                models.BookingSeat.seat_id == models.Seat.id,
+            )
+            .filter(
+                models.BookingSeat.booking_id == booking.id
+            )
             .with_for_update()
             .all()
         )
@@ -341,6 +426,7 @@ def mock_payment(
                     seat.hold_expires_at = None
 
             db.commit()
+
             return {
                 "message": "Payment failed; held seats have been released",
                 "booking_code": booking.booking_code,
@@ -364,6 +450,7 @@ def mock_payment(
             booking_id=booking.id,
             ticket_code=secrets.token_urlsafe(16),
         )
+
         db.add(ticket)
         db.commit()
 
@@ -382,6 +469,10 @@ def mock_payment(
         raise
 
 
+# --------------------------------------------------
+# TICKET RETRIEVAL AND QR CODE
+# --------------------------------------------------
+
 @app.get("/tickets/{booking_code}")
 def get_ticket(
     booking_code: str,
@@ -389,12 +480,17 @@ def get_ticket(
 ):
     booking = (
         db.query(models.Booking)
-        .filter(models.Booking.booking_code == booking_code)
+        .filter(
+            models.Booking.booking_code == booking_code
+        )
         .first()
     )
 
     if booking is None:
-        raise HTTPException(status_code=404, detail="Booking not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Booking not found",
+        )
 
     if booking.status != "confirmed":
         raise HTTPException(
@@ -404,12 +500,17 @@ def get_ticket(
 
     ticket = (
         db.query(models.Ticket)
-        .filter(models.Ticket.booking_id == booking.id)
+        .filter(
+            models.Ticket.booking_id == booking.id
+        )
         .first()
     )
 
     if ticket is None:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket not found",
+        )
 
     booking_seats = (
         db.query(models.BookingSeat, models.Seat)
@@ -417,8 +518,13 @@ def get_ticket(
             models.Seat,
             models.BookingSeat.seat_id == models.Seat.id,
         )
-        .filter(models.BookingSeat.booking_id == booking.id)
-        .order_by(models.Seat.row_label, models.Seat.seat_number)
+        .filter(
+            models.BookingSeat.booking_id == booking.id
+        )
+        .order_by(
+            models.Seat.row_label,
+            models.Seat.seat_number,
+        )
         .all()
     )
 
@@ -442,6 +548,10 @@ def get_ticket(
     }
 
 
+# --------------------------------------------------
+# STAFF CHECK-IN
+# --------------------------------------------------
+
 @app.post("/check-in/{ticket_code}")
 def check_in_ticket(
     ticket_code: str,
@@ -450,7 +560,9 @@ def check_in_ticket(
     try:
         ticket = (
             db.query(models.Ticket)
-            .filter(models.Ticket.ticket_code == ticket_code)
+            .filter(
+                models.Ticket.ticket_code == ticket_code
+            )
             .with_for_update()
             .first()
         )
@@ -469,7 +581,9 @@ def check_in_ticket(
 
         booking = (
             db.query(models.Booking)
-            .filter(models.Booking.id == ticket.booking_id)
+            .filter(
+                models.Booking.id == ticket.booking_id
+            )
             .first()
         )
 
@@ -479,6 +593,27 @@ def check_in_ticket(
                 detail="Only confirmed bookings can check in",
             )
 
+        booking_seats = (
+            db.query(models.BookingSeat, models.Seat)
+            .join(
+                models.Seat,
+                models.BookingSeat.seat_id == models.Seat.id,
+            )
+            .filter(
+                models.BookingSeat.booking_id == booking.id
+            )
+            .order_by(
+                models.Seat.row_label,
+                models.Seat.seat_number,
+            )
+            .all()
+        )
+
+        seat_numbers = [
+            f"{seat.row_label}{seat.seat_number}"
+            for booking_seat, seat in booking_seats
+        ]
+
         ticket.checked_in_at = datetime.now(timezone.utc)
         db.commit()
 
@@ -486,6 +621,7 @@ def check_in_ticket(
             "message": "Check-in successful",
             "ticket_code": ticket.ticket_code,
             "customer_name": booking.customer_name,
+            "seat_numbers": seat_numbers,
             "checked_in_at": ticket.checked_in_at.isoformat(),
         }
 
@@ -496,6 +632,10 @@ def check_in_ticket(
         db.rollback()
         raise
 
+
+# --------------------------------------------------
+# ORGANISER DASHBOARD
+# --------------------------------------------------
 
 @app.get("/events/{event_id}/dashboard")
 def get_event_dashboard(
@@ -509,7 +649,10 @@ def get_event_dashboard(
     )
 
     if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
 
     seats = (
         db.query(models.Seat)
@@ -518,9 +661,15 @@ def get_event_dashboard(
     )
 
     total_seats = len(seats)
-    available_seats = sum(1 for seat in seats if seat.status == "available")
-    held_seats = sum(1 for seat in seats if seat.status == "held")
-    booked_seats = sum(1 for seat in seats if seat.status == "booked")
+    available_seats = sum(
+        1 for seat in seats if seat.status == "available"
+    )
+    held_seats = sum(
+        1 for seat in seats if seat.status == "held"
+    )
+    booked_seats = sum(
+        1 for seat in seats if seat.status == "booked"
+    )
 
     confirmed_bookings = (
         db.query(models.Booking)
@@ -562,6 +711,11 @@ def get_event_dashboard(
         "checked_in_count": checked_in_count,
     }
 
+
+# --------------------------------------------------
+# BOOKING CANCELLATION
+# --------------------------------------------------
+
 @app.post("/bookings/{booking_code}/cancel")
 def cancel_booking(
     booking_code: str,
@@ -570,7 +724,9 @@ def cancel_booking(
     try:
         booking = (
             db.query(models.Booking)
-            .filter(models.Booking.booking_code == booking_code)
+            .filter(
+                models.Booking.booking_code == booking_code
+            )
             .with_for_update()
             .first()
         )
@@ -589,14 +745,18 @@ def cancel_booking(
 
         booking_seats = (
             db.query(models.BookingSeat)
-            .filter(models.BookingSeat.booking_id == booking.id)
+            .filter(
+                models.BookingSeat.booking_id == booking.id
+            )
             .all()
         )
 
         for booking_seat in booking_seats:
             seat = (
                 db.query(models.Seat)
-                .filter(models.Seat.id == booking_seat.seat_id)
+                .filter(
+                    models.Seat.id == booking_seat.seat_id
+                )
                 .with_for_update()
                 .first()
             )

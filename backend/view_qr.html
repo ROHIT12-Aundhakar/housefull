@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Housefull Ticket QR Code</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 40px 20px;
+            background: #f4f4f4;
+        }
+
+        .ticket {
+            background: white;
+            max-width: 400px;
+            margin: auto;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px #0002;
+        }
+
+        img {
+            width: 250px;
+            height: 250px;
+            display: block;
+            margin: 20px auto;
+        }
+
+        p {
+            overflow-wrap: anywhere;
+        }
+    </style>
+</head>
+<body>
+    <div class="ticket">
+        <h1>Housefull</h1>
+        <h2>Your Ticket QR Code</h2>
+
+        <img id="qr" alt="Ticket QR Code">
+
+        <p id="status">Loading QR code...</p>
+    </div>
+
+    <script>
+        const qrCode = "data:image/png;base64,iVBORw0KGgo...";
+
+        const qrImage = document.getElementById("qr");
+        const status = document.getElementById("status");
+
+        if (qrCode.startsWith("data:image/png;base64,")) {
+            qrImage.src = qrCode;
+            status.textContent = "Ticket QR code loaded successfully!";
+        } else {
+            status.textContent = "Please paste the complete QR code data URL.";
+        }
+    </script>
+</body>
+</html>

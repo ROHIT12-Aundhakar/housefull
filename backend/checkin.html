@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Housefull Staff Check-in</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f2f4f8;
+            display: grid;
+            place-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .card {
+            background: white;
+            padding: 30px;
+            border-radius: 14px;
+            width: min(90%, 400px);
+            box-sizing: border-box;
+            box-shadow: 0 5px 20px #0002;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        label {
+            display: block;
+            margin: 20px 0 8px;
+        }
+
+        input,
+        button {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 12px;
+            font-size: 16px;
+            border-radius: 7px;
+        }
+
+        input {
+            border: 1px solid #bbb;
+        }
+
+        button {
+            margin-top: 14px;
+            border: none;
+            background: #172554;
+            color: white;
+            cursor: pointer;
+        }
+
+        #result {
+            margin-top: 20px;
+            overflow-wrap: anywhere;
+            line-height: 1.5;
+        }
+
+        #result {
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: bold;
+            overflow-wrap: anywhere;
+        }
+
+        #result.success {
+            background: #dcfce7;
+            color: #166534;
+            border: 1px solid #86efac;
+        }
+
+        #result.error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
+
+        #scan-status {
+            text-align: center;
+            font-weight: bold;
+            color: #1d4ed8;
+        }
+    </style>
+
+    <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+
+<body>
+    <h2>Scan Ticket QR Code</h2>
+
+    <div id="reader" style="width: 350px;"></div>
+
+    <p id="scan-status">Camera scanner is ready.</p>
+
+    <hr>
+
+    <h2>Or Enter Ticket Code Manually</h2>
+    <main class="card">
+        <h1>Housefull</h1>
+        <h2>Staff Check-in</h2>
+
+        <form id="checkinForm">
+            <label for="ticketCode">Ticket code</label>
+            <input id="ticketCode" type="text" placeholder="Enter scanned ticket code" required>
+            <button type="submit">Verify & Check In</button>
+        </form>
+
+        <div id="result" role="status"></div>
+
+        <div id="ticket-details" style="display: none; margin-top: 20px;">
+            <h3>Ticket Details</h3>
+
+            <p><strong>Customer:</strong> <span id="customer-name"></span></p>
+            <p><strong>Seat:</strong> <span id="seat-number"></span></p>
+            <p><strong>Ticket Code:</strong> <span id="ticket-code"></span></p>
+            <p><strong>Check-in Time:</strong> <span id="checkin-time"></span></p>
+            <p><strong>Status:</strong> <span id="ticket-status"></span></p>
+        </div>
+
+    </main>
+
+    <script>
+        const API_URL = "http://127.0.0.1:8000";
+
+        document.getElementById("checkinForm").addEventListener("submit", async (event) => {
+            event.preventDefault();
+
+            const ticketCode = document.getElementById("ticketCode").value.trim();
+            const result = document.getElementById("result");
+
+            result.textContent = "Checking ticket...";
+
+            try {
+                const response = await fetch(
+                    `${API_URL}/check-in/${encodeURIComponent(ticketCode)}`,
+                    { method: "POST" }
+                );
+
+                const data = await response.json();
+
+
+                if (!response.ok) {
+                    result.className = "error";
+                    result.textContent =
+                        `Check-in rejected: ${data.detail || "Unknown error"}`;
+                    return;
+                }
+
+
+                result.className = "success";
+                result.textContent = "Check-in successful!";
+
+                document.getElementById("customer-name").textContent =
+                    data.customer_name || "Not available";
+
+                document.getElementById("seat-number").textContent =
+                    data.seat_numbers?.join(", ") || "Not available";
+
+                document.getElementById("ticket-code").textContent = ticketCode;
+
+                document.getElementById("checkin-time").textContent =
+                    data.checked_in_at || "Recorded";
+
+                document.getElementById("ticket-status").textContent = "Checked in";
+
+                document.getElementById("ticket-details").style.display = "block";
+
+
+
+            } catch (error) {
+                result.className = "error";
+                result.textContent =
+                    "Could not connect to Housefull API. Make sure the backend server is running.";
+            }
+
+        });
+
+        const scanner = new Html5QrcodeScanner(
+            "reader",
+            {
+                fps: 10,
+                qrbox: { width: 250, height: 250 }
+            },
+            false
+        );
+
+        let scanInProgress = false;
+
+        async function onScanSuccess(decodedText) {
+            if (scanInProgress) return;
+
+            scanInProgress = true;
+
+            // Put the scanned ticket code into the existing input.
+            document.getElementById("ticketCode").value = decodedText;
+
+            document.getElementById("scan-status").textContent =
+                "QR detected! Checking ticket...";
+
+            // Reuse the existing manual check-in form.
+            document.getElementById("checkinForm").requestSubmit();
+
+            // Prevent repeated scans of the same QR code.
+            setTimeout(() => {
+                scanInProgress = false;
+            }, 3000);
+        }
+
+        function onScanFailure(error) {
+            // Normal scanning attempts can fail while searching for a QR code.
+        }
+
+        scanner.render(onScanSuccess, onScanFailure);
+
+    </script>
+</body>
+
+</html>
