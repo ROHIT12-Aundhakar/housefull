@@ -238,7 +238,9 @@ def test_successful_payment_ticket_and_checkin(
     assert ticket["booking_code"] == booking["booking_code"]
     assert ticket["customer_name"] == "Rohit"
     assert ticket["ticket_code"]
-    assert ticket["qr_code"].startswith("data:image/png;base64,")
+    assert ticket["qr_code"].startswith(
+        "data:image/png;base64,"
+    )
     assert len(ticket["seats"]) == 1
 
     checkin_response = client.post(
@@ -419,3 +421,127 @@ def test_cancelling_booking_releases_seats(
     )
 
     assert second_cancel_response.status_code == 409
+
+
+# --------------------------------------------------
+# TEST 8: DASHBOARD SHOWS BOOKINGS, TICKETS AND REFUNDS
+# --------------------------------------------------
+
+def test_dashboard_includes_booking_and_refund_details(
+    client,
+    admin_headers,
+):
+    event = create_test_event(client, admin_headers)
+
+    seats = client.get(
+        f"/events/{event['id']}/seats"
+    ).json()
+
+    # Create a confirmed booking that will be checked in.
+    checked_in_booking, _ = make_confirmed_booking(
+        client,
+        event["id"],
+        [seats[0]["id"]],
+    )
+
+    ticket_response = client.get(
+        f"/tickets/{checked_in_booking['booking_code']}"
+    )
+
+    assert ticket_response.status_code == 200
+
+    ticket = ticket_response.json()
+
+    checkin_response = client.post(
+        f"/check-in/{ticket['ticket_code']}"
+    )
+
+    assert checkin_response.status_code == 200
+
+    # Create a second confirmed booking and cancel it,
+    # so the dashboard has a real mock refund record.
+    cancelled_booking, _ = make_confirmed_booking(
+        client,
+        event["id"],
+        [seats[1]["id"]],
+    )
+
+    cancel_response = client.post(
+        f"/bookings/{cancelled_booking['booking_code']}/cancel",
+        headers=admin_headers,
+    )
+
+    assert cancel_response.status_code == 200, (
+        cancel_response.text
+    )
+
+    # The organiser dashboard must require admin authentication.
+    unauthorized_dashboard = client.get(
+        f"/events/{event['id']}/dashboard"
+    )
+
+    assert unauthorized_dashboard.status_code == 401
+
+    # Request the dashboard as an authenticated admin.
+    dashboard_response = client.get(
+        f"/events/{event['id']}/dashboard",
+        headers=admin_headers,
+    )
+
+    assert dashboard_response.status_code == 200, (
+        dashboard_response.text
+    )
+
+    dashboard = dashboard_response.json()
+
+    # Verify the dashboard statistics.
+    assert dashboard["event_id"] == event["id"]
+    assert dashboard["total_seats"] == 6
+    assert dashboard["total_bookings"] == 2
+    assert dashboard["confirmed_bookings"] == 1
+    assert dashboard["total_revenue"] == 200.0
+    assert isinstance(dashboard["bookings"], list)
+
+    # Find the checked-in booking.
+    checked_in_record = next(
+        item for item in dashboard["bookings"]
+        if item["booking_code"]
+        == checked_in_booking["booking_code"]
+    )
+
+    assert checked_in_record["customer_name"] == "Rohit"
+    assert checked_in_record["customer_email"] == "rohit@example.com"
+    assert checked_in_record["status"] == "confirmed"
+    assert checked_in_record["total_amount"] == 200.0
+
+    # Verify seat information.
+    assert len(checked_in_record["seats"]) == 1
+    assert checked_in_record["seats"][0]["row"] == "A"
+    assert checked_in_record["seats"][0]["seat_number"] == (
+        seats[0]["seat_number"]
+    )
+
+    # Verify ticket and check-in information.
+    assert checked_in_record["ticket"] is not None
+    assert checked_in_record["ticket"]["ticket_code"] == (
+        ticket["ticket_code"]
+    )
+    assert checked_in_record["ticket"]["checked_in"] is True
+    assert checked_in_record["ticket"]["checked_in_at"] is not None
+
+    # Verify the cancelled booking and its recorded refund.
+    cancelled_record = next(
+        item for item in dashboard["bookings"]
+        if item["booking_code"]
+        == cancelled_booking["booking_code"]
+    )
+
+    assert cancelled_record["status"] == "cancelled"
+    assert cancelled_record["ticket"] is not None
+    assert cancelled_record["refund"] is not None
+    assert cancelled_record["refund"]["reference"].startswith(
+        "MOCK-REFUND-"
+    )
+    assert cancelled_record["refund"]["status"] == "mock_refunded"
+    assert cancelled_record["refund"]["amount"] == 200.0
+    assert cancelled_record["refund"]["created_at"] is not None

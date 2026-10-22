@@ -804,6 +804,7 @@ def get_event_dashboard(
     db: Session = Depends(get_db),
     current_admin: str = Depends(get_current_admin),
 ):
+    # Find the event.
     event = (
         db.query(models.Event)
         .filter(models.Event.id == event_id)
@@ -816,6 +817,7 @@ def get_event_dashboard(
             detail="Event not found",
         )
 
+    # Get all seats for this event.
     seats = (
         db.query(models.Seat)
         .filter(models.Seat.event_id == event_id)
@@ -823,16 +825,23 @@ def get_event_dashboard(
     )
 
     total_seats = len(seats)
+
     available_seats = sum(
-        seat.status == "available" for seat in seats
-    )
-    held_seats = sum(
-        seat.status == "held" for seat in seats
-    )
-    booked_seats = sum(
-        seat.status == "booked" for seat in seats
+        seat.status == "available"
+        for seat in seats
     )
 
+    held_seats = sum(
+        seat.status == "held"
+        for seat in seats
+    )
+
+    booked_seats = sum(
+        seat.status == "booked"
+        for seat in seats
+    )
+
+    # Get confirmed bookings for revenue calculation.
     confirmed_bookings = (
         db.query(models.Booking)
         .filter(
@@ -847,6 +856,7 @@ def get_event_dashboard(
         for booking in confirmed_bookings
     )
 
+    # Count checked-in tickets.
     checked_in_count = (
         db.query(models.Ticket)
         .join(
@@ -861,6 +871,119 @@ def get_event_dashboard(
         .count()
     )
 
+    # Get all bookings for this event, newest first.
+    all_bookings = (
+        db.query(models.Booking)
+        .filter(
+            models.Booking.event_id == event_id
+        )
+        .order_by(models.Booking.id.desc())
+        .all()
+    )
+
+    booking_list = []
+
+    for booking in all_bookings:
+        # Get seats associated with this booking.
+        booking_seats = (
+            db.query(models.BookingSeat, models.Seat)
+            .join(
+                models.Seat,
+                models.BookingSeat.seat_id == models.Seat.id,
+            )
+            .filter(
+                models.BookingSeat.booking_id == booking.id
+            )
+            .order_by(
+                models.Seat.row_label,
+                models.Seat.seat_number,
+            )
+            .all()
+        )
+
+        seat_details = [
+            {
+                "seat_id": seat.id,
+                "row": seat.row_label,
+                "seat_number": seat.seat_number,
+                "price": float(
+                    booking_seat.price_at_booking
+                ),
+            }
+            for booking_seat, seat in booking_seats
+        ]
+
+        # Get ticket and check-in information, if available.
+        ticket = (
+            db.query(models.Ticket)
+            .filter(
+                models.Ticket.booking_id == booking.id
+            )
+            .first()
+        )
+
+        # Get refund information, if a refund exists.
+        refund = (
+            db.query(models.Refund)
+            .filter(
+                models.Refund.booking_id == booking.id
+            )
+            .first()
+        )
+
+        booking_list.append(
+            {
+                "booking_code": booking.booking_code,
+                "customer_name": booking.customer_name,
+                "customer_email": booking.customer_email,
+                "status": booking.status,
+                "total_amount": float(
+                    booking.total_amount
+                ),
+                "created_at": (
+                    booking.created_at.isoformat()
+                    if booking.created_at
+                    else None
+                ),
+                "expires_at": (
+                    booking.expires_at.isoformat()
+                    if booking.expires_at
+                    else None
+                ),
+                "seats": seat_details,
+                "ticket": (
+                    {
+                        "ticket_code": ticket.ticket_code,
+                        "checked_in": (
+                            ticket.checked_in_at is not None
+                        ),
+                        "checked_in_at": (
+                            ticket.checked_in_at.isoformat()
+                            if ticket.checked_in_at
+                            else None
+                        ),
+                    }
+                    if ticket
+                    else None
+                ),
+                "refund": (
+                    {
+                        "reference": refund.refund_reference,
+                        "amount": float(refund.amount),
+                        "status": refund.status,
+                        "created_at": (
+                            refund.created_at.isoformat()
+                            if refund.created_at
+                            else None
+                        ),
+                    }
+                    if refund
+                    else None
+                ),
+            }
+        )
+
+    # Return dashboard statistics and the booking list.
     return {
         "event_id": event.id,
         "event_name": event.name,
@@ -871,6 +994,8 @@ def get_event_dashboard(
         "confirmed_bookings": len(confirmed_bookings),
         "total_revenue": round(total_revenue, 2),
         "checked_in_count": checked_in_count,
+        "total_bookings": len(all_bookings),
+        "bookings": booking_list,
     }
 
 
