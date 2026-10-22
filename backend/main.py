@@ -51,6 +51,28 @@ password_hash = PasswordHash.recommended()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+# --------------------------------------------------
+# DATETIME HELPERS
+# --------------------------------------------------
+
+def is_expired(expiry, now):
+    """Compare timestamps safely, treating naive datetimes as UTC."""
+    if expiry is None:
+        return True
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    return expiry <= now
+
+
+# --------------------------------------------------
+# AUTHENTICATION HELPERS
+# --------------------------------------------------
+
 def get_current_admin(
     credentials: HTTPAuthorizationCredentials | None = Depends(
         bearer_scheme
@@ -63,11 +85,9 @@ def get_current_admin(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
-
     try:
         payload = jwt.decode(
-            token,
+            credentials.credentials,
             JWT_SECRET_KEY,
             algorithms=[JWT_ALGORITHM],
         )
@@ -96,13 +116,11 @@ def create_access_token(username: str) -> str:
         minutes=ACCESS_TOKEN_EXPIRE_MINUTES
     )
 
-    payload = {
-        "sub": username,
-        "exp": expires_at,
-    }
-
     return jwt.encode(
-        payload,
+        {
+            "sub": username,
+            "exp": expires_at,
+        },
         JWT_SECRET_KEY,
         algorithm=JWT_ALGORITHM,
     )
@@ -115,7 +133,7 @@ def create_access_token(username: str) -> str:
 app = FastAPI(
     title="Housefull API",
     description="Seat booking and event management API",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 app.add_middleware(
@@ -208,12 +226,8 @@ def admin_login(request: AdminLoginRequest):
             detail="Incorrect username or password",
         )
 
-    access_token = create_access_token(
-        request.username
-    )
-
     return {
-        "access_token": access_token,
+        "access_token": create_access_token(request.username),
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     }
@@ -267,14 +281,12 @@ def create_event(
             detail="Ticket prices cannot be negative",
         )
 
-    total_seats = sum(event.rows.values())
-
     new_event = models.Event(
         name=event.name,
         description=event.description,
         venue=event.venue,
         starts_at=event.starts_at,
-        total_seats=total_seats,
+        total_seats=sum(event.rows.values()),
     )
 
     try:
@@ -283,14 +295,15 @@ def create_event(
 
         for row_label, seat_count in event.rows.items():
             for seat_number in range(1, seat_count + 1):
-                seat = models.Seat(
-                    event_id=new_event.id,
-                    row_label=row_label,
-                    seat_number=seat_number,
-                    price=event.row_prices[row_label],
-                    status="available",
+                db.add(
+                    models.Seat(
+                        event_id=new_event.id,
+                        row_label=row_label,
+                        seat_number=seat_number,
+                        price=event.row_prices[row_label],
+                        status="available",
+                    )
                 )
-                db.add(seat)
 
         db.commit()
         db.refresh(new_event)
@@ -419,8 +432,7 @@ def hold_seats(
         for seat in seats:
             if (
                 seat.status == "held"
-                and seat.hold_expires_at is not None
-                and seat.hold_expires_at <= now
+                and is_expired(seat.hold_expires_at, now)
             ):
                 seat.status = "available"
                 seat.hold_expires_at = None
@@ -440,9 +452,7 @@ def hold_seats(
                 },
             )
 
-        total_amount = sum(
-            float(seat.price) for seat in seats
-        )
+        total_amount = sum(float(seat.price) for seat in seats)
 
         booking = models.Booking(
             booking_code=secrets.token_urlsafe(12),
@@ -528,10 +538,7 @@ def mock_payment(
 
         now = datetime.now(timezone.utc)
 
-        if (
-            booking.expires_at is None
-            or booking.expires_at <= now
-        ):
+        if is_expired(booking.expires_at, now):
             booking.status = "expired"
 
             seats = (
@@ -660,9 +667,7 @@ def get_ticket(
 
     ticket = (
         db.query(models.Ticket)
-        .filter(
-            models.Ticket.booking_id == booking.id
-        )
+        .filter(models.Ticket.booking_id == booking.id)
         .first()
     )
 
@@ -720,9 +725,7 @@ def check_in_ticket(
     try:
         ticket = (
             db.query(models.Ticket)
-            .filter(
-                models.Ticket.ticket_code == ticket_code
-            )
+            .filter(models.Ticket.ticket_code == ticket_code)
             .with_for_update()
             .first()
         )
@@ -741,9 +744,7 @@ def check_in_ticket(
 
         booking = (
             db.query(models.Booking)
-            .filter(
-                models.Booking.id == ticket.booking_id
-            )
+            .filter(models.Booking.id == ticket.booking_id)
             .first()
         )
 
@@ -823,13 +824,13 @@ def get_event_dashboard(
 
     total_seats = len(seats)
     available_seats = sum(
-        1 for seat in seats if seat.status == "available"
+        seat.status == "available" for seat in seats
     )
     held_seats = sum(
-        1 for seat in seats if seat.status == "held"
+        seat.status == "held" for seat in seats
     )
     booked_seats = sum(
-        1 for seat in seats if seat.status == "booked"
+        seat.status == "booked" for seat in seats
     )
 
     confirmed_bookings = (
@@ -874,13 +875,14 @@ def get_event_dashboard(
 
 
 # --------------------------------------------------
-# BOOKING CANCELLATION
+# BOOKING CANCELLATION - ADMIN ONLY + MOCK REFUND
 # --------------------------------------------------
 
 @app.post("/bookings/{booking_code}/cancel")
 def cancel_booking(
     booking_code: str,
     db: Session = Depends(get_db),
+    current_admin: str = Depends(get_current_admin),
 ):
     try:
         booking = (
@@ -904,36 +906,65 @@ def cancel_booking(
                 detail="Only confirmed bookings can be cancelled",
             )
 
+        ticket = (
+            db.query(models.Ticket)
+            .filter(models.Ticket.booking_id == booking.id)
+            .with_for_update()
+            .first()
+        )
+
+        if ticket is not None and ticket.checked_in_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A checked-in booking cannot be cancelled",
+            )
+
         booking_seats = (
             db.query(models.BookingSeat)
-            .filter(
-                models.BookingSeat.booking_id == booking.id
-            )
+            .filter(models.BookingSeat.booking_id == booking.id)
             .all()
         )
 
         for booking_seat in booking_seats:
             seat = (
                 db.query(models.Seat)
-                .filter(
-                    models.Seat.id == booking_seat.seat_id
-                )
+                .filter(models.Seat.id == booking_seat.seat_id)
                 .with_for_update()
                 .first()
             )
 
-            if seat is not None:
+            if seat is not None and seat.status == "booked":
                 seat.status = "available"
                 seat.hold_expires_at = None
 
+        refund = models.Refund(
+            booking_id=booking.id,
+            refund_reference=(
+                f"MOCK-REFUND-{secrets.token_urlsafe(12)}"
+            ),
+            amount=booking.total_amount,
+            status="mock_refunded",
+        )
+
         booking.status = "cancelled"
+        db.add(refund)
         db.commit()
+        db.refresh(refund)
 
         return {
-            "message": "Booking cancelled successfully",
+            "message": "Booking cancelled; mock refund recorded",
             "booking_code": booking.booking_code,
             "status": booking.status,
             "released_seats": len(booking_seats),
+            "refund": {
+                "reference": refund.refund_reference,
+                "amount": float(refund.amount),
+                "status": refund.status,
+                "note": (
+                    "Simulated refund only; no real money was transferred"
+                ),
+            },
+            "cancelled_by": current_admin,
         }
 
     except HTTPException:

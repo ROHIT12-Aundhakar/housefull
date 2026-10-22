@@ -45,7 +45,9 @@ class Seat(Base):
     row_label: Mapped[str] = mapped_column(String(10), nullable=False)
     seat_number: Mapped[int] = mapped_column(Integer, nullable=False)
     price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="available")
+    status: Mapped[str] = mapped_column(
+        String(20), default="available", nullable=False
+    )
     hold_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -63,7 +65,9 @@ class Booking(Base):
     )
     customer_name: Mapped[str] = mapped_column(String(150), nullable=False)
     customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="pending")
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", nullable=False
+    )
     total_amount: Mapped[float] = mapped_column(
         Numeric(10, 2), nullable=False
     )
@@ -107,6 +111,31 @@ class Ticket(Base):
     )
     checked_in_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Refund(Base):
+    """Records simulated refunds; does not transfer real money."""
+
+    __tablename__ = "refunds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    refund_reference: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False
+    )
+    amount: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), default="mock_refunded", nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
