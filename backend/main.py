@@ -1101,3 +1101,188 @@ def cancel_booking(
             status_code=500,
             detail="Could not cancel booking",
         )
+
+
+# --------------------------------------------------
+# ADMIN DATA RESET - DEVELOPMENT / TESTING ONLY
+# --------------------------------------------------
+
+@app.delete("/admin/events/{event_id}")
+def delete_event_and_related_data(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_admin: str = Depends(get_current_admin),
+):
+    """Delete one event and its related booking data."""
+    try:
+        event = (
+            db.query(models.Event)
+            .filter(models.Event.id == event_id)
+            .first()
+        )
+
+        if event is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Event not found",
+            )
+
+        booking_ids = [
+            booking_id
+            for (booking_id,) in db.query(models.Booking.id)
+            .filter(models.Booking.event_id == event_id)
+            .all()
+        ]
+
+        # Delete dependent records before their parent records.
+        if booking_ids:
+            deleted_booking_seats = (
+                db.query(models.BookingSeat)
+                .filter(
+                    models.BookingSeat.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_tickets = (
+                db.query(models.Ticket)
+                .filter(
+                    models.Ticket.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_refunds = (
+                db.query(models.Refund)
+                .filter(
+                    models.Refund.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_bookings = (
+                db.query(models.Booking)
+                .filter(models.Booking.id.in_(booking_ids))
+                .delete(synchronize_session=False)
+            )
+        else:
+            deleted_booking_seats = 0
+            deleted_tickets = 0
+            deleted_refunds = 0
+            deleted_bookings = 0
+
+        deleted_seats = (
+            db.query(models.Seat)
+            .filter(models.Seat.event_id == event_id)
+            .delete(synchronize_session=False)
+        )
+
+        db.delete(event)
+        db.commit()
+
+        return {
+            "message": "Event and related data deleted successfully",
+            "event_id": event_id,
+            "deleted_seats": deleted_seats,
+            "deleted_bookings": deleted_bookings,
+            "deleted_booking_seats": deleted_booking_seats,
+            "deleted_tickets": deleted_tickets,
+            "deleted_refunds": deleted_refunds,
+            "deleted_by": current_admin,
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete event and related data",
+        )
+
+
+@app.delete("/admin/bookings/reset")
+def reset_all_booking_data(
+    db: Session = Depends(get_db),
+    current_admin: str = Depends(get_current_admin),
+):
+    """
+    Clear booking history, tickets, and refunds.
+    Keep all events and seats, making every seat available.
+    Use only for development/testing data.
+    """
+    try:
+        booking_ids = [
+            booking_id
+            for (booking_id,) in db.query(models.Booking.id).all()
+        ]
+
+        if booking_ids:
+            deleted_booking_seats = (
+                db.query(models.BookingSeat)
+                .filter(
+                    models.BookingSeat.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_tickets = (
+                db.query(models.Ticket)
+                .filter(
+                    models.Ticket.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_refunds = (
+                db.query(models.Refund)
+                .filter(
+                    models.Refund.booking_id.in_(booking_ids)
+                )
+                .delete(synchronize_session=False)
+            )
+
+            deleted_bookings = (
+                db.query(models.Booking)
+                .filter(models.Booking.id.in_(booking_ids))
+                .delete(synchronize_session=False)
+            )
+        else:
+            deleted_booking_seats = 0
+            deleted_tickets = 0
+            deleted_refunds = 0
+            deleted_bookings = 0
+
+        # Keep every event and seat, but reset seat availability.
+        db.query(models.Seat).update(
+            {
+                models.Seat.status: "available",
+                models.Seat.hold_expires_at: None,
+            },
+            synchronize_session=False,
+        )
+
+        db.commit()
+
+        return {
+            "message": "Booking data cleared; events and seats preserved",
+            "deleted_bookings": deleted_bookings,
+            "deleted_booking_seats": deleted_booking_seats,
+            "deleted_tickets": deleted_tickets,
+            "deleted_refunds": deleted_refunds,
+            "events_preserved": True,
+            "all_seats_reset_to_available": True,
+            "reset_by": current_admin,
+            "warning": (
+                "Development/testing reset. "
+                "No real payment or refund was processed."
+            ),
+        }
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not reset booking data",
+        )

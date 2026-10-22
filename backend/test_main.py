@@ -1,4 +1,3 @@
-
 import os
 import tempfile
 import uuid
@@ -6,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
+from sqlalchemy.orm import Session
 
 # Use a separate temporary SQLite database for tests.
 # This keeps tests isolated from the real PostgreSQL database.
@@ -545,3 +544,161 @@ def test_dashboard_includes_booking_and_refund_details(
     assert cancelled_record["refund"]["status"] == "mock_refunded"
     assert cancelled_record["refund"]["amount"] == 200.0
     assert cancelled_record["refund"]["created_at"] is not None
+
+
+# --------------------------------------------------
+# TEST 9: DELETE EVENT AND ALL RELATED RECORDS
+# --------------------------------------------------
+
+def test_delete_event_removes_related_data(
+    client,
+    admin_headers,
+):
+    event = create_test_event(client, admin_headers)
+    seats = client.get(
+        f"/events/{event['id']}/seats"
+    ).json()
+
+    # Create a confirmed booking and a mock refund.
+    booking, _ = make_confirmed_booking(
+        client,
+        event["id"],
+        [seats[0]["id"]],
+    )
+
+    cancel_response = client.post(
+        f"/bookings/{booking['booking_code']}/cancel",
+        headers=admin_headers,
+    )
+    assert cancel_response.status_code == 200
+
+    # Deleting an event must require admin authentication.
+    unauthorized = client.delete(
+        f"/admin/events/{event['id']}"
+    )
+    assert unauthorized.status_code == 401
+
+    # Delete the event as an authenticated admin.
+    response = client.delete(
+        f"/admin/events/{event['id']}",
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    result = response.json()
+    assert result["event_id"] == event["id"]
+    assert result["deleted_seats"] == 6
+    assert result["deleted_bookings"] == 1
+    assert result["deleted_booking_seats"] == 1
+    assert result["deleted_tickets"] == 1
+    assert result["deleted_refunds"] == 1
+
+    # Confirm the event no longer exists.
+    assert client.get(
+        f"/events/{event['id']}"
+    ).status_code == 404
+
+    # Confirm all associated records have been removed.
+    with Session(main.engine) as db:
+        assert db.query(main.models.Seat).filter(
+            main.models.Seat.event_id == event["id"]
+        ).count() == 0
+
+        assert db.query(main.models.Booking).filter(
+            main.models.Booking.event_id == event["id"]
+        ).count() == 0
+
+        assert db.query(main.models.Ticket).count() == 0
+        assert db.query(main.models.Refund).count() == 0
+
+
+# --------------------------------------------------
+# TEST 10: RESET BOOKINGS BUT KEEP EVENTS AND SEATS
+# --------------------------------------------------
+
+def test_reset_bookings_preserves_events_and_seats(
+    client,
+    admin_headers,
+):
+    event = create_test_event(client, admin_headers)
+    seats = client.get(
+        f"/events/{event['id']}/seats"
+    ).json()
+
+    # Create a confirmed booking; one seat becomes booked.
+    confirmed_booking, _ = make_confirmed_booking(
+        client,
+        event["id"],
+        [seats[0]["id"]],
+    )
+
+    # Create another confirmed booking and cancel it
+    # to ensure the database contains a mock refund.
+    cancelled_booking, _ = make_confirmed_booking(
+        client,
+        event["id"],
+        [seats[1]["id"]],
+    )
+
+    cancel_response = client.post(
+        f"/bookings/{cancelled_booking['booking_code']}/cancel",
+        headers=admin_headers,
+    )
+    assert cancel_response.status_code == 200
+
+    # An unauthenticated reset must be rejected.
+    unauthorized = client.delete("/admin/bookings/reset")
+    assert unauthorized.status_code == 401
+
+    # Reset booking data as the authenticated admin.
+    response = client.delete(
+        "/admin/bookings/reset",
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    result = response.json()
+    assert result["deleted_bookings"] == 2
+    assert result["deleted_booking_seats"] == 2
+    assert result["deleted_tickets"] == 2
+    assert result["deleted_refunds"] == 1
+    assert result["events_preserved"] is True
+    assert result["all_seats_reset_to_available"] is True
+
+    # The event must still exist.
+    event_response = client.get(f"/events/{event['id']}")
+    assert event_response.status_code == 200
+
+    # Every seat must remain and be available.
+    updated_seats = client.get(
+        f"/events/{event['id']}/seats"
+    ).json()
+
+    assert len(updated_seats) == 6
+    assert all(
+        seat["status"] == "available"
+        for seat in updated_seats
+    )
+
+    # All booking-related records must be gone.
+    with Session(main.engine) as db:
+        assert db.query(main.models.Booking).count() == 0
+        assert db.query(main.models.BookingSeat).count() == 0
+        assert db.query(main.models.Ticket).count() == 0
+        assert db.query(main.models.Refund).count() == 0
+        assert db.query(main.models.Event).count() == 1
+        assert db.query(main.models.Seat).count() == 6
+
+        # Check the database field directly because the seats API
+        # response schema does not include hold_expires_at.
+        all_seats = db.query(main.models.Seat).all()
+
+        assert all(
+            seat.status == "available"
+            for seat in all_seats
+        )
+
+        assert all(
+            seat.hold_expires_at is None
+            for seat in all_seats
+        )
