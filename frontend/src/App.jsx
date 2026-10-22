@@ -4,14 +4,63 @@ import "./App.css";
 
 const API_URL = "http://127.0.0.1:8000";
 
-// ADMIN DASHBOARD
 function Dashboard({ events }) {
   const [eventId, setEventId] = useState("");
   const [stats, setStats] = useState(null);
   const [loadingStats, setLoadingStats] = useState(false);
   const [dashboardError, setDashboardError] = useState("");
+  const [token, setToken] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
 
-  async function loadDashboard(id = eventId) {
+  async function login(event) {
+    event.preventDefault();
+    setLoginLoading(true);
+    setDashboardError("");
+
+    try {
+      const response = await fetch(`${API_URL}/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: username.trim(),
+          password,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Admin login failed. Check your credentials."
+        );
+      }
+
+      if (!data.access_token) {
+        throw new Error("The server did not return an access token.");
+      }
+
+      setToken(data.access_token);
+      setPassword("");
+      setDashboardError("");
+    } catch (err) {
+      setDashboardError(
+        err.message || "Could not connect to the backend."
+      );
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
+  async function loadDashboard(id = eventId, authToken = token) {
+    if (!authToken) {
+      setDashboardError("Please log in as an admin first.");
+      return;
+    }
+
     if (!id) {
       setDashboardError("Please select an event.");
       return;
@@ -21,10 +70,24 @@ function Dashboard({ events }) {
     setDashboardError("");
 
     try {
-      const response = await fetch(`${API_URL}/events/${id}/dashboard`);
+      const response = await fetch(
+        `${API_URL}/events/${id}/dashboard`,
+        {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        }
+      );
+
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setToken("");
+          setStats(null);
+          throw new Error("Admin login required. Please log in again.");
+        }
+
         throw new Error(
           typeof data.detail === "string"
             ? data.detail
@@ -35,10 +98,20 @@ function Dashboard({ events }) {
       setStats(data);
       setEventId(String(id));
     } catch (err) {
-      setDashboardError(err.message || "Could not connect to the backend.");
+      setDashboardError(
+        err.message || "Could not connect to the backend."
+      );
     } finally {
       setLoadingStats(false);
     }
+  }
+
+  function logout() {
+    setToken("");
+    setStats(null);
+    setEventId("");
+    setPassword("");
+    setDashboardError("");
   }
 
   const cards = stats
@@ -83,84 +156,148 @@ function Dashboard({ events }) {
           </h2>
           <p>Monitor bookings, revenue, seats, and attendance.</p>
         </div>
-      </div>
 
-      <div className="booking-summary">
-        <div className="customer-fields">
-          <label htmlFor="dashboard-event">Select event</label>
-          <select
-            id="dashboard-event"
-            value={eventId}
-            onChange={(event) => {
-              setEventId(event.target.value);
-              setStats(null);
-              setDashboardError("");
-            }}
+        {token && (
+          <button
+            type="button"
+            className="close-button"
+            onClick={logout}
           >
-            <option value="">Choose an event</option>
-            {events.map((event) => (
-              <option key={event.id} value={event.id}>
-                {event.name || event.event_name} (ID: {event.id})
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <button
-          type="button"
-          className="book-button"
-          onClick={() => loadDashboard()}
-          disabled={loadingStats || !eventId}
-        >
-          {loadingStats ? "Loading statistics..." : "Load / Refresh Dashboard ↻"}
-        </button>
-
-        {dashboardError && (
-          <p className="message error" role="alert">
-            {dashboardError}
-          </p>
-        )}
-
-        {stats && (
-          <>
-            <h3>{stats.event_name}</h3>
-            <p className="summary-note">
-              Event ID: {stats.event_id}. Refresh to get the latest figures.
-            </p>
-
-            <div className="admin-stats-grid">
-              {cards.map((card) => (
-                <article className="admin-stat-card" key={card.label}>
-                  <span className="admin-stat-icon">{card.icon}</span>
-                  <p>{card.label}</p>
-                  <h3>{card.value ?? 0}</h3>
-                </article>
-              ))}
-            </div>
-
-            <div className="admin-progress">
-              <div className="admin-progress-heading">
-                <span>Seat occupancy</span>
-                <strong>{occupancy}%</strong>
-              </div>
-
-              <div
-                className="admin-progress-track"
-                role="progressbar"
-                aria-label="Seat occupancy"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={occupancy}
-              >
-                <div
-                  className="admin-progress-fill"
-                  style={{ width: `${occupancy}%` }}
-                />
-              </div>
-            </div>
-          </>
+            Admin Logout
+          </button>
         )}
       </div>
+
+      {!token ? (
+        <form className="booking-summary" onSubmit={login}>
+          <span className="eyebrow">RESTRICTED ACCESS</span>
+          <h3>Admin Login</h3>
+          <p>Sign in to access the administrator dashboard.</p>
+
+          <div className="customer-fields">
+            <label htmlFor="admin-username">Username</label>
+            <input
+              id="admin-username"
+              type="text"
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Enter admin username"
+              required
+              disabled={loginLoading}
+            />
+
+            <label htmlFor="admin-password">Password</label>
+            <input
+              id="admin-password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Enter admin password"
+              required
+              disabled={loginLoading}
+            />
+          </div>
+
+          {dashboardError && (
+            <p className="message error" role="alert">
+              {dashboardError}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            className="book-button"
+            disabled={loginLoading}
+          >
+            {loginLoading ? "Signing in..." : "Admin Login →"}
+          </button>
+        </form>
+      ) : (
+        <div className="booking-summary">
+          <p className="summary-note">
+            You are signed in as an administrator.
+          </p>
+
+          <div className="customer-fields">
+            <label htmlFor="dashboard-event">Select event</label>
+            <select
+              id="dashboard-event"
+              value={eventId}
+              onChange={(event) => {
+                setEventId(event.target.value);
+                setStats(null);
+                setDashboardError("");
+              }}
+            >
+              <option value="">Choose an event</option>
+              {events.map((event) => (
+                <option key={event.id} value={event.id}>
+                  {event.name || event.event_name} (ID: {event.id})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            className="book-button"
+            onClick={() => loadDashboard()}
+            disabled={loadingStats || !eventId}
+          >
+            {loadingStats
+              ? "Loading statistics..."
+              : "Load / Refresh Dashboard ↻"}
+          </button>
+
+          {dashboardError && (
+            <p className="message error" role="alert">
+              {dashboardError}
+            </p>
+          )}
+
+          {stats && (
+            <>
+              <h3>{stats.event_name}</h3>
+              <p className="summary-note">
+                Event ID: {stats.event_id}. Refresh to get the latest figures.
+              </p>
+
+              <div className="admin-stats-grid">
+                {cards.map((card) => (
+                  <article className="admin-stat-card" key={card.label}>
+                    <span className="admin-stat-icon">{card.icon}</span>
+                    <p>{card.label}</p>
+                    <h3>{card.value ?? 0}</h3>
+                  </article>
+                ))}
+              </div>
+
+              <div className="admin-progress">
+                <div className="admin-progress-heading">
+                  <span>Seat occupancy</span>
+                  <strong>{occupancy}%</strong>
+                </div>
+
+                <div
+                  className="admin-progress-track"
+                  role="progressbar"
+                  aria-label="Seat occupancy"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={occupancy}
+                >
+                  <div
+                    className="admin-progress-fill"
+                    style={{ width: `${occupancy}%` }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -185,7 +322,6 @@ function App() {
   const [paymentMessage, setPaymentMessage] = useState("");
   const [ticket, setTicket] = useState(null);
 
-  // Ticket check-in states
   const [ticketCode, setTicketCode] = useState("");
   const [checkinLoading, setCheckinLoading] = useState(false);
   const [checkinResult, setCheckinResult] = useState(null);
@@ -459,9 +595,7 @@ function App() {
         <a className="logo" href="#">
           HOUSE<span>FULL</span>
         </a>
-        <span className="nav-label">
-          YOUR NEXT EXPERIENCE STARTS HERE
-        </span>
+        <span className="nav-label">YOUR NEXT EXPERIENCE STARTS HERE</span>
       </header>
 
       <main>
@@ -534,9 +668,7 @@ function App() {
                 </div>
 
                 <div className="event-info">
-                  <span className="event-date">
-                    {formatDate(event.starts_at)}
-                  </span>
+                  <span className="event-date">{formatDate(event.starts_at)}</span>
                   <h3>{event.name || event.event_name}</h3>
                   <p>{event.venue || "Venue to be announced"}</p>
                   <button
@@ -606,9 +738,9 @@ function App() {
                       <button
                         type="button"
                         key={seat.id}
-                        className={`seat-item ${
-                          isSelected ? "selected" : ""
-                        } ${!isAvailable ? "unavailable" : ""}`}
+                        className={`seat-item ${isSelected ? "selected" : ""} ${
+                          !isAvailable ? "unavailable" : ""
+                        }`}
                         disabled={
                           !isAvailable || bookingLoading || paymentLoading
                         }
@@ -629,9 +761,7 @@ function App() {
                               : seat.status || "unknown"
                           }`}
                         >
-                          {isSelected
-                            ? "Selected"
-                            : seat.status || "Unknown"}
+                          {isSelected ? "Selected" : seat.status || "Unknown"}
                         </span>
                       </button>
                     );
@@ -656,9 +786,7 @@ function App() {
                           .join(", ")}
                       </strong>
                     </p>
-                    <p className="booking-total">
-                      Total: ₹{totalPrice.toFixed(2)}
-                    </p>
+                    <p className="booking-total">Total: ₹{totalPrice.toFixed(2)}</p>
 
                     <div className="customer-fields">
                       <label htmlFor="customer-name">Full name</label>
@@ -667,9 +795,7 @@ function App() {
                         type="text"
                         autoComplete="name"
                         value={customerName}
-                        onChange={(event) =>
-                          setCustomerName(event.target.value)
-                        }
+                        onChange={(event) => setCustomerName(event.target.value)}
                         placeholder="Enter your full name"
                         disabled={bookingLoading}
                       />
@@ -680,9 +806,7 @@ function App() {
                         type="email"
                         autoComplete="email"
                         value={customerEmail}
-                        onChange={(event) =>
-                          setCustomerEmail(event.target.value)
-                        }
+                        onChange={(event) => setCustomerEmail(event.target.value)}
                         placeholder="Enter your email"
                         disabled={bookingLoading}
                       />
@@ -721,9 +845,7 @@ function App() {
                         ₹{Number(bookingResult.total_amount ?? 0).toFixed(2)}
                       </strong>
                     </p>
-                    <p>
-                      Status: <strong>{bookingResult.status}</strong>
-                    </p>
+                    <p>Status: <strong>{bookingResult.status}</strong></p>
                     <p className="summary-note">
                       This is a simulated payment for project testing, not a
                       real payment. Complete it before the 5-minute hold expires.
@@ -905,7 +1027,6 @@ function App() {
           </form>
         </section>
 
-        {/* ADMIN DASHBOARD */}
         <Dashboard events={events} />
       </main>
 

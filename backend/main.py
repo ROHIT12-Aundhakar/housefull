@@ -1,24 +1,121 @@
 
-from pydantic import BaseModel
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from datetime import datetime, timedelta, timezone
+import os
 import secrets
 import qrcode
 import base64
+
 from io import BytesIO
+from datetime import datetime, timedelta, timezone
+
+from dotenv import load_dotenv
+from jose import jwt, JWTError
+from pwdlib import PasswordHash
+
+from pydantic import BaseModel
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    status,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 import models
 import schemas
 from database import Base, engine, get_db
 
 
+# --------------------------------------------------
+# ENVIRONMENT AND AUTHENTICATION CONFIGURATION
+# --------------------------------------------------
+
+load_dotenv()
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+if not ADMIN_USERNAME or not ADMIN_PASSWORD_HASH or not JWT_SECRET_KEY:
+    raise RuntimeError(
+        "Missing ADMIN_USERNAME, ADMIN_PASSWORD_HASH, "
+        "or JWT_SECRET_KEY in backend/.env"
+    )
+
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+password_hash = PasswordHash.recommended()
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        bearer_scheme
+    ),
+):
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin login required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+
+        username = payload.get("sub")
+
+        if not username or username != ADMIN_USERNAME:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid admin token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return username
+
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired admin token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def create_access_token(username: str) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    payload = {
+        "sub": username,
+        "exp": expires_at,
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+# --------------------------------------------------
+# FASTAPI APPLICATION
+# --------------------------------------------------
+
 app = FastAPI(
     title="Housefull API",
     description="Seat booking and event management API",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -34,6 +131,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+Base.metadata.create_all(bind=engine)
+
+
+# --------------------------------------------------
+# QR CODE GENERATION
+# --------------------------------------------------
+
 def generate_qr_code(ticket_code: str) -> str:
     qr = qrcode.QRCode(
         version=1,
@@ -43,18 +147,24 @@ def generate_qr_code(ticket_code: str) -> str:
     qr.add_data(ticket_code)
     qr.make(fit=True)
 
-    image = qr.make_image(fill_color="black", back_color="white")
+    image = qr.make_image(
+        fill_color="black",
+        back_color="white",
+    )
 
     buffer = BytesIO()
     image.save(buffer, format="PNG")
 
-    encoded_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    encoded_image = base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
+
     return f"data:image/png;base64,{encoded_image}"
 
 
-# Create missing database tables during startup.
-Base.metadata.create_all(bind=engine)
-
+# --------------------------------------------------
+# HOME AND HEALTH
+# --------------------------------------------------
 
 @app.get("/")
 def home():
@@ -70,6 +180,56 @@ def health_check():
 
 
 # --------------------------------------------------
+# ADMIN LOGIN
+# --------------------------------------------------
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/admin/login")
+def admin_login(request: AdminLoginRequest):
+    if not secrets.compare_digest(
+        request.username,
+        ADMIN_USERNAME,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+        )
+
+    if not password_hash.verify(
+        request.password,
+        ADMIN_PASSWORD_HASH,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+        )
+
+    access_token = create_access_token(
+        request.username
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+@app.get("/admin/me")
+def get_admin_profile(
+    current_admin: str = Depends(get_current_admin),
+):
+    return {
+        "username": current_admin,
+        "role": "admin",
+    }
+
+
+# --------------------------------------------------
 # EVENTS
 # --------------------------------------------------
 
@@ -81,6 +241,7 @@ def health_check():
 def create_event(
     event: schemas.EventCreate,
     db: Session = Depends(get_db),
+    current_admin: str = Depends(get_current_admin),
 ):
     if not event.rows:
         raise HTTPException(
@@ -246,7 +407,6 @@ def hold_seats(
                 detail="One or more seats were not found",
             )
 
-        # All selected seats must belong to one event.
         if any(
             seat.event_id != seats[0].event_id
             for seat in seats
@@ -256,7 +416,6 @@ def hold_seats(
                 detail="All seats must belong to the same event",
             )
 
-        # Release expired holds.
         for seat in seats:
             if (
                 seat.status == "held"
@@ -635,13 +794,14 @@ def check_in_ticket(
 
 
 # --------------------------------------------------
-# ORGANISER DASHBOARD
+# ORGANISER DASHBOARD - ADMIN ONLY
 # --------------------------------------------------
 
 @app.get("/events/{event_id}/dashboard")
 def get_event_dashboard(
     event_id: int,
     db: Session = Depends(get_db),
+    current_admin: str = Depends(get_current_admin),
 ):
     event = (
         db.query(models.Event)
